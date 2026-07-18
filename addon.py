@@ -13,10 +13,18 @@ from fastapi import APIRouter
 from pydantic import BaseModel, Field, SecretStr
 
 from app.addons.payments.base import PaymentAddon
-from app.addons.payments.helpers import effective_redirect_url, extract_order_id, mock_checkout
+from app.addons.payments.helpers import (
+    create_payment_error,
+    effective_redirect_url,
+    extract_order_id,
+    header_get,
+    mock_checkout,
+    verify_hmac_sha256_hex,
+)
 from schemas.payment import PaymentWebhookOutcome
 from app.addons.log import info, warning
 from app.addons.config_serialization import dump_addon_config
+from typing import Mapping
 
 CheckoutEnvironment = Literal["sandbox", "live"]
 
@@ -167,7 +175,7 @@ class CheckoutAddon(PaymentAddon):
                 }
         except Exception as exc:
             warning("Checkout", "create_payment error: {}", exc)
-            return mock_checkout("checkout", order_id, amount, currency)
+            return create_payment_error("checkout", exc, order_id)
 
     async def confirm_payment(self, payment_id: str) -> Dict[str, Any]:
         status = await self.get_payment_status(payment_id)
@@ -228,6 +236,19 @@ class CheckoutAddon(PaymentAddon):
 
     def webhook_signature_header(self) -> str:
         return "cko-signature"
+
+    async def verify_webhook(
+        self,
+        *,
+        headers: Mapping[str, str],
+        body: bytes,
+    ) -> bool:
+        """Verify the Cko-Signature HMAC-SHA256 hex digest of the raw body."""
+        if not self._webhook_secret:
+            warning("Checkout", "verify_webhook skipped: webhook secret not configured")
+            return False
+        signature = header_get(headers, "cko-signature")
+        return verify_hmac_sha256_hex(self._webhook_secret, body, signature)
 
     async def parse_webhook(
         self, payload: Dict[str, Any], signature: str
